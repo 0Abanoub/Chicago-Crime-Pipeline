@@ -1,0 +1,20 @@
+# Environment / secrets
+.env
+
+# Airflow generated files
+airflow/logs/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
