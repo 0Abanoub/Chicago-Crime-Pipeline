@@ -1,0 +1,7 @@
+FROM apache/airflow:2.9.3
+
+# مكتبات الربط بـ Spark وHDFS اللي ناقصة من الصورة الرسمية
+RUN pip install --no-cache-dir \
+    apache-airflow-providers-apache-spark \
+    apache-airflow-providers-apache-hdfs \
+    pyspark==3.5.1
