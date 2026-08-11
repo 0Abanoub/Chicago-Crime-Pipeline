@@ -2,9 +2,6 @@ version: "3.8"
 
 services:
 
-  # =====================================================
-  # 1) قاعدة بيانات Airflow (بتخزن فيها بياناته الداخلية)
-  # =====================================================
   postgres:
     image: postgres:15
     container_name: airflow_postgres
@@ -17,9 +14,6 @@ services:
     ports:
       - "5432:5432"
 
-  # =====================================================
-  # 2) تهيئة Airflow لأول مرة (بيتشغل مرة واحدة بس)
-  # =====================================================
   airflow-init:
     image: apache/airflow:2.9.3
     container_name: airflow_init
@@ -36,9 +30,6 @@ services:
       airflow users create --username admin --password admin
       --firstname admin --lastname admin --role Admin --email admin@example.com"
 
-  # =====================================================
-  # 3) واجهة Airflow (اللي هتفتحها من المتصفح)
-  # =====================================================
   airflow-webserver:
     image: apache/airflow:2.9.3
     container_name: airflow_webserver
@@ -54,9 +45,6 @@ services:
       - "8080:8080"
     command: webserver
 
-  # =====================================================
-  # 4) مُجدوِل Airflow (اللي بيشغل الـ DAGs فعليًا)
-  # =====================================================
   airflow-scheduler:
     image: apache/airflow:2.9.3
     container_name: airflow_scheduler
@@ -70,9 +58,6 @@ services:
       - ./logs:/opt/airflow/logs
     command: scheduler
 
-  # =====================================================
-  # 5) HDFS - Namenode (العقل المدبر لمكان تخزين البيانات)
-  # =====================================================
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: namenode
@@ -85,9 +70,6 @@ services:
       - "9870:9870"
       - "9000:9000"
 
-  # =====================================================
-  # 6) HDFS - Datanode (اللي فعليًا بيخزن الملفات)
-  # =====================================================
   datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     container_name: datanode
@@ -101,9 +83,6 @@ services:
     ports:
       - "9864:9864"
 
-  # =====================================================
-  # 7) Spark Master (المايسترو اللي بيوزع الشغل)
-  # =====================================================
   spark-master:
     image: bitnamilegacy/spark:3.5.1
     container_name: spark_master
@@ -113,9 +92,6 @@ services:
       - "8081:8080"
       - "7077:7077"
 
-  # =====================================================
-  # 8) Spark Worker (العامل اللي بينفذ المعالجة فعليًا)
-  # =====================================================
   spark-worker:
     image: bitnamilegacy/spark:3.5.1
     container_name: spark_worker
@@ -124,6 +100,22 @@ services:
     environment:
       SPARK_MODE: worker
       SPARK_MASTER_URL: spark://spark-master:7077
+
+  spark-thrift-server:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: spark_thrift_server
+    depends_on:
+      - spark-master
+      - spark-worker
+    ports:
+      - "10000:10000"
+    command: >
+      /opt/bitnami/spark/bin/spark-submit
+      --class org.apache.spark.sql.hive.thriftserver.HiveThriftServer2
+      --master spark://spark-master:7077
+      --conf spark.hive.server2.thrift.port=10000
+      --conf spark.hive.server2.thrift.bind.host=0.0.0.0
+      spark-internal
 
 volumes:
   postgres_data:
