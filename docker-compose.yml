@@ -1,14 +1,202 @@
+<<<<<<< HEAD
 services:
 
   postgres:
     image: postgres:15
     container_name: airflow_postgres
+=======
+name: bigdata-lab
+
+x-airflow-common-env: &airflow-common-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+  AIRFLOW__CORE__FERNET_KEY: ""
+  AIRFLOW__WEBSERVER__SECRET_KEY: "change-me-please"
+  HDFS_NAMENODE: "hdfs://namenode:9000"
+  SPARK_MASTER: "spark://spark-master:7077"
+  KAFKA_BOOTSTRAP: "kafka:9092"
+
+networks:
+  bigdata-net:
+    name: bigdata-net
+
+volumes:
+  namenode_data:
+  datanode_data:
+  postgres_data:
+  kafka_data:
+
+services:
+  # -------------------------------------------------------------------------
+  # HDFS
+  # -------------------------------------------------------------------------
+  namenode:
+    image: bde2020/hadoop-namenode:${HADOOP_IMAGE_TAG}
+    container_name: namenode
+    hostname: namenode
+    restart: unless-stopped
+    env_file: ./hadoop/hadoop.env
+    environment:
+      - CLUSTER_NAME=bigdata-lab
+    ports:
+      - "${NAMENODE_UI_PORT}:9870"
+      - "${HDFS_RPC_PORT}:9000"
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    networks: [bigdata-net]
+
+  datanode:
+    image: bde2020/hadoop-datanode:${HADOOP_IMAGE_TAG}
+    container_name: datanode
+    hostname: datanode
+    restart: unless-stopped
+    depends_on: [namenode]
+    env_file: ./hadoop/hadoop.env
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "${DATANODE_UI_PORT}:9864"
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    networks: [bigdata-net]
+
+  # -------------------------------------------------------------------------
+  # Spark (standalone cluster: 1 master + 1 worker)
+  # -------------------------------------------------------------------------
+  spark-master:
+    image: bde2020/spark-master:${SPARK_IMAGE_TAG}
+    container_name: spark-master
+    hostname: spark-master
+    restart: unless-stopped
+    environment:
+      - INIT_DAEMON_STEP=setup_spark
+    ports:
+      - "${SPARK_MASTER_UI_PORT}:8080"
+      - "${SPARK_MASTER_PORT}:7077"
+    volumes:
+      - ./spark/apps:/opt/spark-apps
+    networks: [bigdata-net]
+
+  spark-worker:
+    image: bde2020/spark-worker:${SPARK_IMAGE_TAG}
+    container_name: spark-worker
+    hostname: spark-worker
+    restart: unless-stopped
+    depends_on: [spark-master]
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=3G
+      - SPARK_WORKER_CORES=2
+    ports:
+      - "${SPARK_WORKER_UI_PORT}:8081"
+    volumes:
+      - ./spark/apps:/opt/spark-apps
+    networks: [bigdata-net]
+
+  spark-thrift-server:
+    build:
+      context: ./spark/thrift
+    image: bigdata-lab-spark-thrift:local
+    container_name: spark-thrift-server
+    hostname: spark-thrift-server
+    restart: unless-stopped
+    depends_on:
+      - spark-master
+      - namenode
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - HADOOP_CONF_DIR=/etc/hadoop
+    command: >
+      bash -c "/spark/sbin/start-thriftserver.sh
+      --master spark://spark-master:7077
+      --hiveconf hive.server2.thrift.bind.host=0.0.0.0
+      --hiveconf hive.server2.thrift.port=10000
+      --conf spark.hadoop.fs.defaultFS=hdfs://namenode:9000
+      && tail -f /dev/null"
+    ports:
+      - "10000:10000"
+    networks: [bigdata-net]
+
+  jupyter:
+    build:
+      context: ./jupyter
+      args:
+        PYSPARK_VERSION: ${PYSPARK_VERSION}
+    container_name: jupyter
+    hostname: jupyter
+    restart: unless-stopped
+    depends_on: [spark-master, namenode, kafka]
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=lab
+    ports:
+      - "${JUPYTER_PORT}:8888"
+    volumes:
+      - ./jupyter/notebooks:/home/jovyan/work
+      - ./spark/apps:/home/jovyan/work/spark-apps
+    networks: [bigdata-net]
+
+  # -------------------------------------------------------------------------
+  # Kafka (KRaft mode - no Zookeeper) + Kafka UI
+  # -------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:${KAFKA_IMAGE_TAG}
+    container_name: kafka
+    hostname: kafka
+    restart: unless-stopped
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+      - CLUSTER_ID=bigdata-lab-kraft-cluster-01
+    ports:
+      - "${KAFKA_INTERNAL_PORT}:9092"
+      - "${KAFKA_EXTERNAL_PORT}:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks: [bigdata-net]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:${KAFKA_UI_IMAGE_TAG}
+    container_name: kafka-ui
+    hostname: kafka-ui
+    restart: unless-stopped
+    depends_on: [kafka]
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=bigdata-lab
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    networks: [bigdata-net]
+
+  # -------------------------------------------------------------------------
+  # Airflow (LocalExecutor - single container runs scheduler + webserver)
+  # -------------------------------------------------------------------------
+  postgres:
+    image: postgres:${POSTGRES_IMAGE_TAG}
+    container_name: airflow-postgres
+    restart: unless-stopped
+>>>>>>> origin/main
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes:
       - postgres_data:/var/lib/postgresql/data
+<<<<<<< HEAD
     ports:
       - "5432:5432"
     healthcheck:
@@ -43,10 +231,40 @@ services:
       context: .
       dockerfile: Dockerfile.airflow
     container_name: airflow_webserver
+=======
+    networks: [bigdata-net]
+
+  airflow-init:
+    build:
+      context: ./airflow/docker
+      args:
+        AIRFLOW_BASE_IMAGE: ${AIRFLOW_BASE_IMAGE}
+    image: bigdata-lab-airflow:local
+    container_name: airflow-init
+    depends_on: [postgres]
+    environment:
+      <<: *airflow-common-env
+    entrypoint: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}
+      "
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks: [bigdata-net]
+
+  airflow-webserver:
+    image: bigdata-lab-airflow:local
+    container_name: airflow-webserver
+    restart: unless-stopped
+>>>>>>> origin/main
     depends_on:
       airflow-init:
         condition: service_completed_successfully
     environment:
+<<<<<<< HEAD
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-please_change_this_secret_key}
@@ -63,10 +281,27 @@ services:
       context: .
       dockerfile: Dockerfile.airflow
     container_name: airflow_scheduler
+=======
+      <<: *airflow-common-env
+    command: webserver
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT}:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks: [bigdata-net]
+
+  airflow-scheduler:
+    image: bigdata-lab-airflow:local
+    container_name: airflow-scheduler
+    restart: unless-stopped
+>>>>>>> origin/main
     depends_on:
       airflow-init:
         condition: service_completed_successfully
     environment:
+<<<<<<< HEAD
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-please_change_this_secret_key}
@@ -148,3 +383,12 @@ volumes:
   postgres_data:
   namenode_data:
   datanode_data:
+=======
+      <<: *airflow-common-env
+    command: scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks: [bigdata-net]
+>>>>>>> origin/main

@@ -1,5 +1,28 @@
+<<<<<<< HEAD
 logs/
 __pycache__/
 *.pyc
 .env
 data/
+=======
+# Environment / secrets
+.env
+
+# Airflow generated files
+airflow/logs/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+>>>>>>> origin/main
