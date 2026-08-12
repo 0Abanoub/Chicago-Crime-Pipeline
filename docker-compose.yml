@@ -47,6 +47,11 @@ volumes:
   namenode_data:
   datanode_data:
   postgres_data:
+  # Spark Thrift Server runs an embedded Hive metastore (Derby) in its
+  # working directory. This volume keeps the table metadata (e.g.
+  # default.curated_crimes) across container restarts, so Power BI/BI clients
+  # still find the table even before the next DAG run re-registers it.
+  thrift_metastore_data:
 
 services:
   # -------------------------------------------------------------------------
@@ -288,6 +293,7 @@ services:
     volumes:
       - ./hadoop-conf:/opt/hadoop/conf:ro
       - ./spark/apps:/opt/spark-apps
+      - thrift_metastore_data:/opt/spark/work-dir
     ports:
       - "10000:10000"
     networks: [bigdata-net]
