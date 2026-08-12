@@ -48,7 +48,7 @@ Everything runs locally through Docker Compose. The pipeline is batch-oriented, 
 
 Download:
 
-[Chicago Crime Dataset — Kaggle](https://www.kaggle.com/datasets/nathaniellybrand/chicago-crime-dataset-2001-present/data?utm_source=chatgpt.com)
+[Chicago Crime Dataset — Kaggle](https://www.kaggle.com/datasets/nathaniellybrand/chicago-crime-dataset-2001-present/data)
 
 The required file is:
 
@@ -68,7 +68,7 @@ The dataset is approximately **1.85 GB**.
 
 Download the required Spark distribution:
 
-[Apache Spark 3.5.1 Release](https://spark.apache.org/releases/spark-release-3-5-1.html?utm_source=chatgpt.com)
+[Apache Spark 3.5.1 Release](https://archive.apache.org/dist/spark/spark-3.5.1/spark-3.5.1-bin-hadoop3.tgz)
 
 Required file:
 
