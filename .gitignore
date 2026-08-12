@@ -4,6 +4,12 @@
 # Airflow generated files
 airflow/logs/
 
+# Bundled Spark distribution (382 MB) — downloaded/copied locally, not versioned
+airflow/docker/spark-3.5.1-bin-hadoop3.tgz
+
+# Source dataset (~1.8 GB) — never commit the raw CSV data
+data/
+
 # Python
 __pycache__/
 *.py[cod]
