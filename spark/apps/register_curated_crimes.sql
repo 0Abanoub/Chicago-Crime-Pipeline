@@ -3,10 +3,18 @@
 --
 -- Layout on HDFS: /curated/year=YYYY/month=M/
 --   (month partition values are written unpadded by Spark, e.g. month=1)
--- The DROP is metadata-only (external table), the data files are untouched.
-DROP TABLE IF EXISTS default.curated_crimes;
-
-CREATE TABLE default.curated_crimes (
+--
+-- CREATE TABLE IF NOT EXISTS is safe to run on every monthly batch: it does not
+-- touch existing data or metadata. MSCK REPAIR TABLE then registers any
+-- partition directories that were written since the last run, so a brand-new
+-- month becomes visible to SQL. This script is executed by the monthly DAG
+-- (chicago_crime_pipeline_v2, task ensure_sql_table) and can also be run
+-- manually against the Thrift Server:
+--
+--   docker exec spark-thrift-server beeline \
+--       -u jdbc:hive2://localhost:10000 \
+--       -f /opt/spark-apps/register_curated_crimes.sql
+CREATE TABLE IF NOT EXISTS default.curated_crimes (
   ID STRING,
   `Case Number` STRING,
   `Date` STRING,
