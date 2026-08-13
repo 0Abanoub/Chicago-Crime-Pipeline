@@ -1,16 +1,43 @@
+# =============================================================================
+# Chicago Crime Data Engineering Pipeline — Docker Compose
+#
+#   Source CSV -> Airflow -> HDFS Raw -> Spark (DQ) -> HDFS Curated Parquet
+#                                                       -> Spark Thrift SQL -> Power BI
+#
+# Batch-oriented architecture: HDFS is the data lake, Spark does the
+# processing, Airflow orchestrates, and the Spark Thrift Server serves SQL to
+# Power BI. Kafka is intentionally excluded (batch data, not a stream), and
+# PostgreSQL is only used for Airflow's metadata.
+#
+# Image note: the Spark cluster uses apache/spark:3.5.1 via ./spark/base
+# (adds /spark symlink + PATH for the integration test harness), and the
+# Airflow image bundles the matching Spark 3.5.1 distribution so
+# SparkSubmitOperator can submit from inside the Airflow container.
+# =============================================================================
 name: bigdata-lab
 
 x-airflow-common-env: &airflow-common-env
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
-  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-  AIRFLOW__CORE__FERNET_KEY: ""
-  AIRFLOW__WEBSERVER__SECRET_KEY: "change-me-please"
+  AIRFLOW__WEBSERVER__SECRET_KEY: "crime-pipeline-secret-key"
+  # Spark client config inside the Airflow container
+  SPARK_HOME: "/opt/spark"
+  JAVA_HOME: "/usr/lib/jvm/java-17-openjdk-amd64"
+  HADOOP_CONF_DIR: "/opt/hadoop/conf"
+  HADOOP_USER_NAME: "root"
   HDFS_NAMENODE: "hdfs://namenode:9000"
   SPARK_MASTER: "spark://spark-master:7077"
-  KAFKA_BOOTSTRAP: "kafka:9092"
+
+x-airflow-volumes: &airflow-volumes
+  - ./airflow/dags:/opt/airflow/dags
+  - ./airflow/logs:/opt/airflow/logs
+  - ./airflow/plugins:/opt/airflow/plugins
+  - ./data:/opt/airflow/data
+  - ./spark/apps:/opt/spark-apps
+  - ./hadoop-conf:/opt/hadoop/conf:ro
 
 networks:
   bigdata-net:
@@ -20,163 +47,11 @@ volumes:
   namenode_data:
   datanode_data:
   postgres_data:
-  kafka_data:
 
 services:
   # -------------------------------------------------------------------------
-  # HDFS
-  # -------------------------------------------------------------------------
-  namenode:
-    image: bde2020/hadoop-namenode:${HADOOP_IMAGE_TAG}
-    container_name: namenode
-    hostname: namenode
-    restart: unless-stopped
-    env_file: ./hadoop/hadoop.env
-    environment:
-      - CLUSTER_NAME=bigdata-lab
-    ports:
-      - "${NAMENODE_UI_PORT}:9870"
-      - "${HDFS_RPC_PORT}:9000"
-    volumes:
-      - namenode_data:/hadoop/dfs/name
-    networks: [bigdata-net]
-
-  datanode:
-    image: bde2020/hadoop-datanode:${HADOOP_IMAGE_TAG}
-    container_name: datanode
-    hostname: datanode
-    restart: unless-stopped
-    depends_on: [namenode]
-    env_file: ./hadoop/hadoop.env
-    environment:
-      - SERVICE_PRECONDITION=namenode:9870
-    ports:
-      - "${DATANODE_UI_PORT}:9864"
-    volumes:
-      - datanode_data:/hadoop/dfs/data
-    networks: [bigdata-net]
-
-  # -------------------------------------------------------------------------
-  # Spark (standalone cluster: 1 master + 1 worker)
-  # -------------------------------------------------------------------------
-  spark-master:
-    image: bde2020/spark-master:${SPARK_IMAGE_TAG}
-    container_name: spark-master
-    hostname: spark-master
-    restart: unless-stopped
-    environment:
-      - INIT_DAEMON_STEP=setup_spark
-    ports:
-      - "${SPARK_MASTER_UI_PORT}:8080"
-      - "${SPARK_MASTER_PORT}:7077"
-    volumes:
-      - ./spark/apps:/opt/spark-apps
-    networks: [bigdata-net]
-
-  spark-worker:
-    image: bde2020/spark-worker:${SPARK_IMAGE_TAG}
-    container_name: spark-worker
-    hostname: spark-worker
-    restart: unless-stopped
-    depends_on: [spark-master]
-    environment:
-      - SPARK_MASTER=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=3G
-      - SPARK_WORKER_CORES=2
-    ports:
-      - "${SPARK_WORKER_UI_PORT}:8081"
-    volumes:
-      - ./spark/apps:/opt/spark-apps
-    networks: [bigdata-net]
-
-  spark-thrift-server:
-    build:
-      context: ./spark/thrift
-    image: bigdata-lab-spark-thrift:local
-    container_name: spark-thrift-server
-    hostname: spark-thrift-server
-    restart: unless-stopped
-    depends_on:
-      - spark-master
-      - namenode
-    environment:
-      - SPARK_MASTER=spark://spark-master:7077
-      - HADOOP_CONF_DIR=/etc/hadoop
-    command: >
-      bash -c "/spark/sbin/start-thriftserver.sh
-      --master spark://spark-master:7077
-      --hiveconf hive.server2.thrift.bind.host=0.0.0.0
-      --hiveconf hive.server2.thrift.port=10000
-      --conf spark.hadoop.fs.defaultFS=hdfs://namenode:9000
-      && tail -f /dev/null"
-    ports:
-      - "10000:10000"
-    networks: [bigdata-net]
-
-  jupyter:
-    build:
-      context: ./jupyter
-      args:
-        PYSPARK_VERSION: ${PYSPARK_VERSION}
-    container_name: jupyter
-    hostname: jupyter
-    restart: unless-stopped
-    depends_on: [spark-master, namenode, kafka]
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-      - JUPYTER_TOKEN=lab
-    ports:
-      - "${JUPYTER_PORT}:8888"
-    volumes:
-      - ./jupyter/notebooks:/home/jovyan/work
-      - ./spark/apps:/home/jovyan/work/spark-apps
-    networks: [bigdata-net]
-
-  # -------------------------------------------------------------------------
-  # Kafka (KRaft mode - no Zookeeper) + Kafka UI
-  # -------------------------------------------------------------------------
-  kafka:
-    image: apache/kafka:${KAFKA_IMAGE_TAG}
-    container_name: kafka
-    hostname: kafka
-    restart: unless-stopped
-    environment:
-      - KAFKA_NODE_ID=1
-      - KAFKA_PROCESS_ROLES=broker,controller
-      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
-      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
-      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
-      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
-      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
-      - CLUSTER_ID=bigdata-lab-kraft-cluster-01
-    ports:
-      - "${KAFKA_INTERNAL_PORT}:9092"
-      - "${KAFKA_EXTERNAL_PORT}:9094"
-    volumes:
-      - kafka_data:/var/lib/kafka/data
-    networks: [bigdata-net]
-
-  kafka-ui:
-    image: provectuslabs/kafka-ui:${KAFKA_UI_IMAGE_TAG}
-    container_name: kafka-ui
-    hostname: kafka-ui
-    restart: unless-stopped
-    depends_on: [kafka]
-    environment:
-      - KAFKA_CLUSTERS_0_NAME=bigdata-lab
-      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
-    ports:
-      - "${KAFKA_UI_PORT}:8080"
-    networks: [bigdata-net]
-
-  # -------------------------------------------------------------------------
-  # Airflow (LocalExecutor - single container runs scheduler + webserver)
+  # Airflow metadata database (only Airflow tables live here — no data
+  # warehouse, the curated data stays on HDFS and is served by Spark Thrift)
   # -------------------------------------------------------------------------
   postgres:
     image: postgres:${POSTGRES_IMAGE_TAG}
@@ -189,7 +64,16 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks: [bigdata-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
+  # -------------------------------------------------------------------------
+  # Airflow (LocalExecutor: one init container + webserver + scheduler)
+  # -------------------------------------------------------------------------
   airflow-init:
     build:
       context: ./airflow/docker
@@ -197,50 +81,237 @@ services:
         AIRFLOW_BASE_IMAGE: ${AIRFLOW_BASE_IMAGE}
     image: bigdata-lab-airflow:local
     container_name: airflow-init
-    depends_on: [postgres]
+    user: "${AIRFLOW_UID}:0"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       <<: *airflow-common-env
-    entrypoint: >
-      bash -c "
-      airflow db migrate &&
-      airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}
-      "
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
+    volumes: *airflow-volumes
     networks: [bigdata-net]
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate && \
+        (airflow users create \
+          --username ${AIRFLOW_ADMIN_USER} \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname Admin --lastname User --role Admin \
+          --email ${AIRFLOW_ADMIN_EMAIL} \
+          || true) && \
+        (airflow connections delete spark_default \
+          || true) && \
+        (airflow connections add spark_default \
+          --conn-type spark \
+          --conn-host 'spark://spark-master:7077' \
+          || true)
 
   airflow-webserver:
     image: bigdata-lab-airflow:local
     container_name: airflow-webserver
+    user: "${AIRFLOW_UID}:0"
     restart: unless-stopped
     depends_on:
       airflow-init:
         condition: service_completed_successfully
     environment:
       <<: *airflow-common-env
-    command: webserver
+    volumes: *airflow-volumes
+    networks: [bigdata-net]
     ports:
       - "${AIRFLOW_WEBSERVER_PORT}:8080"
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
-    networks: [bigdata-net]
+    command: webserver
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   airflow-scheduler:
     image: bigdata-lab-airflow:local
     container_name: airflow-scheduler
+    user: "${AIRFLOW_UID}:0"
     restart: unless-stopped
     depends_on:
       airflow-init:
         condition: service_completed_successfully
     environment:
       <<: *airflow-common-env
-    command: scheduler
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
+    volumes: *airflow-volumes
     networks: [bigdata-net]
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(hostname) || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+
+  # -------------------------------------------------------------------------
+  # HDFS (single datanode, replication 1 — sized for a laptop lab)
+  # -------------------------------------------------------------------------
+  namenode:
+    image: bde2020/hadoop-namenode:${HADOOP_IMAGE_TAG}
+    container_name: namenode
+    hostname: namenode
+    restart: unless-stopped
+    env_file: ./hadoop/hadoop.env
+    environment:
+      - CLUSTER_NAME=bigdata-lab
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    ports:
+      - "${NAMENODE_UI_PORT}:9870"
+      - "${HDFS_RPC_PORT}:9000"
+    networks: [bigdata-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9870/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  datanode:
+    image: bde2020/hadoop-datanode:${HADOOP_IMAGE_TAG}
+    container_name: datanode
+    hostname: datanode
+    restart: unless-stopped
+    depends_on:
+      namenode:
+        condition: service_healthy
+    env_file: ./hadoop/hadoop.env
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    ports:
+      - "${DATANODE_UI_PORT}:9864"
+    networks: [bigdata-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9864/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # -------------------------------------------------------------------------
+  # Spark (standalone: 1 master + 1 worker, 4 cores / 4G)
+  # -------------------------------------------------------------------------
+  spark-master:
+    build:
+      context: ./spark/base
+      args:
+        SPARK_IMAGE_TAG: ${SPARK_IMAGE_TAG}
+    image: bigdata-lab-spark:local
+    container_name: spark-master
+    hostname: spark-master
+    restart: unless-stopped
+    environment:
+      HADOOP_USER_NAME: "root"
+      HADOOP_CONF_DIR: "/opt/hadoop/conf"
+      HDFS_NAMENODE: "hdfs://namenode:9000"
+    volumes:
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+      - ./spark/apps:/opt/spark-apps
+    ports:
+      - "${SPARK_MASTER_UI_PORT}:8080"
+      - "${SPARK_MASTER_PORT}:7077"
+    networks: [bigdata-net]
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  spark-worker:
+    image: bigdata-lab-spark:local
+    container_name: spark-worker
+    hostname: spark-worker
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    environment:
+      HADOOP_USER_NAME: "root"
+      HADOOP_CONF_DIR: "/opt/hadoop/conf"
+      HDFS_NAMENODE: "hdfs://namenode:9000"
+    volumes:
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+      - ./spark/apps:/opt/spark-apps
+    ports:
+      - "${SPARK_WORKER_UI_PORT}:8081"
+    networks: [bigdata-net]
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --cores
+      - "8"
+      - --memory
+      - "8G"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # -------------------------------------------------------------------------
+  # Spark Thrift Server — the SQL serving layer for Power BI (JDBC :10000)
+  # -------------------------------------------------------------------------
+  spark-thrift-server:
+    image: bigdata-lab-spark:local
+    container_name: spark-thrift-server
+    hostname: spark-thrift-server
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      HADOOP_USER_NAME: "root"
+      HADOOP_CONF_DIR: "/opt/hadoop/conf"
+      HDFS_NAMENODE: "hdfs://namenode:9000"
+    volumes:
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+      - ./spark/apps:/opt/spark-apps
+    ports:
+      - "10000:10000"
+    networks: [bigdata-net]
+    command:
+      - /opt/spark/sbin/start-thriftserver.sh
+      - --master
+      - spark://spark-master:7077
+      - --driver-memory
+      - "1G"
+      - --executor-memory
+      - "1G"
+      - --executor-cores
+      - "1"
+      - --conf
+      - spark.cores.max=2
+      - --conf
+      - spark.sql.warehouse.dir=hdfs://namenode:9000/user/hive/warehouse
+      - --hiveconf
+      - hive.server2.thrift.bind.host=0.0.0.0
+      - --hiveconf
+      - hive.server2.thrift.port=10000
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost', 10000)); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
